@@ -1,0 +1,103 @@
+name: Deploy Infrastructure
+
+on:
+  workflow_dispatch:
+
+jobs:
+  infra:
+    name: Provision Azure Infrastructure
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy Bicep
+        id: bicep
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            OUTPUT=$(az deployment group create \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --template-file infrastructure/bicep/main.bicep \
+              --parameters \
+                mtaAdminSshPublicKey="${{ vars.MTA_SSH_PUBLIC_KEY }}" \
+                postgresAdminPassword="${{ secrets.POSTGRES_ADMIN_PASSWORD }}" \
+                nextauthSecret="${{ secrets.NEXTAUTH_SECRET }}" \
+                stripeSecretKey="${{ secrets.STRIPE_SECRET_KEY }}" \
+                mtaSmtpUser="${{ secrets.MTA_SMTP_USER }}" \
+                mtaSmtpPass="${{ secrets.MTA_SMTP_PASS }}" \
+                mtaInternalToken="${{ secrets.MTA_INTERNAL_TOKEN }}" \
+                sesSmtpUser="${{ secrets.SES_SMTP_USER }}" \
+                sesSmtpPass="${{ secrets.SES_SMTP_PASS }}" \
+                dovecotMasterUser="${{ secrets.DOVECOT_MASTER_USER }}" \
+                dovecotMasterPass="${{ secrets.DOVECOT_MASTER_PASS }}" \
+              --query properties.outputs \
+              --output json)
+
+            echo "API_URL=$(echo $OUTPUT | jq -r '.apiUrl.value')" >> $GITHUB_OUTPUT
+            echo "WEB_URL=$(echo $OUTPUT | jq -r '.webUrl.value')" >> $GITHUB_OUTPUT
+            echo "ACR_LOGIN_SERVER=$(echo $OUTPUT | jq -r '.acrLoginServer.value')" >> $GITHUB_OUTPUT
+            echo "MTA_VM_IP=$(echo $OUTPUT | jq -r '.mtaPublicIp.value')" >> $GITHUB_OUTPUT
+
+      - name: Get ACR credentials
+        id: acr
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            ACR_NAME=$(echo "${{ steps.bicep.outputs.ACR_LOGIN_SERVER }}" | cut -d. -f1)
+            echo "ACR_USERNAME=$(az acr credential show --name $ACR_NAME --query username -o tsv)" >> $GITHUB_OUTPUT
+            echo "ACR_PASSWORD=$(az acr credential show --name $ACR_NAME --query 'passwords[0].value' -o tsv)" >> $GITHUB_OUTPUT
+
+      - name: Get database connection string
+        id: db
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            PG_HOST=$(az postgres flexible-server show \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --name mailwarm-prod-postgres \
+              --query fullyQualifiedDomainName -o tsv)
+            echo "DATABASE_URL=postgresql://mailwarm_admin:${{ secrets.POSTGRES_ADMIN_PASSWORD }}@${PG_HOST}/mailwarm?sslmode=require" >> $GITHUB_OUTPUT
+
+      - name: Get Redis connection string
+        id: redis
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            REDIS_HOST=$(az redis show \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --name mailwarm-prod-redis \
+              --query hostName -o tsv)
+            REDIS_KEY=$(az redis list-keys \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --name mailwarm-prod-redis \
+              --query primaryKey -o tsv)
+            echo "REDIS_URL=rediss://:${REDIS_KEY}@${REDIS_HOST}:6380" >> $GITHUB_OUTPUT
+
+      - name: Print secrets to add to GitHub
+        run: |
+          echo "## Add these to GitHub Secrets" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Secret | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ACR_LOGIN_SERVER | ${{ steps.bicep.outputs.ACR_LOGIN_SERVER }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ACR_USERNAME | ${{ steps.acr.outputs.ACR_USERNAME }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| ACR_PASSWORD | (see workflow logs) |" >> $GITHUB_STEP_SUMMARY
+          echo "| MTA_VM_IP | ${{ steps.bicep.outputs.MTA_VM_IP }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| DATABASE_URL | (see workflow logs) |" >> $GITHUB_STEP_SUMMARY
+          echo "| REDIS_URL | (see workflow logs) |" >> $GITHUB_STEP_SUMMARY
+          echo "| NEXT_PUBLIC_API_URL | ${{ steps.bicep.outputs.API_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| NEXT_PUBLIC_APP_URL | ${{ steps.bicep.outputs.WEB_URL }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ACR_PASSWORD: ${{ steps.acr.outputs.ACR_PASSWORD }}" >> $GITHUB_STEP_SUMMARY
+          echo "DATABASE_URL: ${{ steps.db.outputs.DATABASE_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "REDIS_URL: ${{ steps.redis.outputs.REDIS_URL }}" >> $GITHUB_STEP_SUMMARY
