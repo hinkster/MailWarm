@@ -1,0 +1,17 @@
+# Haraka plugin load order — sequence matters
+
+# Auth (validates relay user against MTA_SMTP_USER/MTA_SMTP_PASS env vars)
+auth_relay
+
+# Inbound connection checks
+connection.tcpserver
+rcpt_to.in_host_list
+
+# DKIM signing (per-domain keys from DB)
+dkim_sign
+
+# Custom MailWarm plugins
+warmup_tracker
+rate_limiter
+bounce_handler
+outbound_selector

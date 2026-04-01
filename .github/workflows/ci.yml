@@ -1,0 +1,254 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+env:
+  NODE_VERSION: "20"
+  PNPM_VERSION: "9"
+
+jobs:
+  # ── Type-check & lint ──────────────────────────────────────────────────────
+  typecheck:
+    name: Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @mailwarm/database db:generate
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+
+      - name: Type check all packages
+        run: pnpm turbo typecheck
+
+  # ── Tests ──────────────────────────────────────────────────────────────────
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: typecheck
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @mailwarm/database db:generate
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+
+      - name: Run tests
+        run: pnpm turbo test
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+
+  # ── Build ──────────────────────────────────────────────────────────────────
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter @mailwarm/database db:generate
+        env:
+          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+
+      - name: Build all apps
+        run: pnpm turbo build
+        env:
+          NEXTAUTH_SECRET: ci-secret
+          NEXT_PUBLIC_API_URL: http://localhost:3001
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+
+      - name: Upload API build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-dist
+          path: apps/api/dist
+          retention-days: 1
+
+  # ── Docker build (main branch only) ───────────────────────────────────────
+  docker:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    strategy:
+      matrix:
+        app: [api, mta, web]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Azure Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.ACR_LOGIN_SERVER }}
+          username: ${{ secrets.ACR_USERNAME }}
+          password: ${{ secrets.ACR_PASSWORD }}
+
+      - name: Build and push ${{ matrix.app }}
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.app == 'mta' && 'apps/mta' || '.' }}
+          file: apps/${{ matrix.app }}/Dockerfile
+          push: true
+          tags: |
+            ${{ secrets.ACR_LOGIN_SERVER }}/mailwarm-${{ matrix.app }}:latest
+            ${{ secrets.ACR_LOGIN_SERVER }}/mailwarm-${{ matrix.app }}:${{ github.sha }}
+          build-args: |
+            NEXTAUTH_SECRET=${{ secrets.NEXTAUTH_SECRET }}
+            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_APP_URL=${{ secrets.NEXT_PUBLIC_APP_URL }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Deploy to Azure (main branch only) ────────────────────────────────────
+  deploy:
+    name: Deploy to Azure
+    runs-on: ubuntu-latest
+    needs: docker
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ── Run DB migrations ────────────────────────────────────────────────
+      - uses: pnpm/action-setup@v3
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run database migrations
+        run: pnpm --filter @mailwarm/database prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+
+      # ── Deploy Container Apps (API, Web, Worker) ─────────────────────────
+      - name: Update API Container App
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az containerapp update \
+              --name mailwarm-${{ vars.ENV }}-api \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/mailwarm-api:${{ github.sha }}
+
+      - name: Update Worker Container App
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az containerapp update \
+              --name mailwarm-${{ vars.ENV }}-worker \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/mailwarm-api:${{ github.sha }}
+
+      - name: Update Web Container App
+        uses: azure/CLI@v2
+        with:
+          azcliversion: latest
+          inlineScript: |
+            az containerapp update \
+              --name mailwarm-${{ vars.ENV }}-web \
+              --resource-group ${{ secrets.AZURE_RESOURCE_GROUP }} \
+              --image ${{ secrets.ACR_LOGIN_SERVER }}/mailwarm-web:${{ github.sha }}
+
+      # ── Deploy MTA + Dovecot to VM via SSH ───────────────────────────────
+      - name: Write SSH key
+        run: |
+          echo "${{ secrets.MTA_SSH_PRIVATE_KEY }}" > /tmp/mta_deploy_key
+          chmod 600 /tmp/mta_deploy_key
+
+      - name: Copy compose file and Dovecot config to VM
+        run: |
+          scp -i /tmp/mta_deploy_key -o StrictHostKeyChecking=no \
+            infrastructure/docker/docker-compose.mta.yml \
+            infrastructure/docker/dovecot/dovecot.conf \
+            mailwarm@${{ secrets.MTA_VM_IP }}:/opt/mailwarm/
+
+      - name: Deploy MTA stack on VM
+        run: |
+          ssh -i /tmp/mta_deploy_key -o StrictHostKeyChecking=no \
+            mailwarm@${{ secrets.MTA_VM_IP }} << 'EOF'
+            set -e
+            cd /opt/mailwarm
+
+            # Write runtime env file (never committed to git)
+            cat > .env << ENVEOF
+            ACR_LOGIN_SERVER=${{ secrets.ACR_LOGIN_SERVER }}
+            IMAGE_TAG=${{ github.sha }}
+            API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+            REDIS_URL=${{ secrets.REDIS_URL }}
+            MTA_HOSTNAME=mail.myownaimodel.ai
+            MTA_INTERNAL_TOKEN=${{ secrets.MTA_INTERNAL_TOKEN }}
+            SES_SMTP_USER=${{ secrets.SES_SMTP_USER }}
+            SES_SMTP_PASS=${{ secrets.SES_SMTP_PASS }}
+            ENVEOF
+
+            # Login to ACR using VM managed identity
+            az login --identity --output none
+            az acr login --name $(echo ${{ secrets.ACR_LOGIN_SERVER }} | cut -d. -f1)
+
+            docker compose -f docker-compose.mta.yml pull
+            docker compose -f docker-compose.mta.yml up -d
+          EOF
+
+      - name: Clean up SSH key
+        if: always()
+        run: rm -f /tmp/mta_deploy_key

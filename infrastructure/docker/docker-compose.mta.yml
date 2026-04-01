@@ -1,0 +1,49 @@
+version: "3.9"
+
+# Deployed to the MTA VM by the CI pipeline.
+# All secrets are supplied via the .env file written during deployment.
+
+services:
+  mta:
+    image: ${ACR_LOGIN_SERVER}/mailwarm-mta:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    ports:
+      - "25:25"
+      - "587:587"
+      - "465:465"
+    environment:
+      API_URL: ${API_URL}
+      REDIS_URL: ${REDIS_URL}
+      MTA_HOSTNAME: ${MTA_HOSTNAME}
+      MTA_INTERNAL_TOKEN: ${MTA_INTERNAL_TOKEN}
+      SES_SMTP_HOST: ${SES_SMTP_HOST:-email-smtp.us-east-1.amazonaws.com}
+      SES_SMTP_PORT: ${SES_SMTP_PORT:-587}
+      SES_SMTP_USER: ${SES_SMTP_USER}
+      SES_SMTP_PASS: ${SES_SMTP_PASS}
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "587"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  dovecot:
+    image: dovecot/dovecot:latest
+    restart: unless-stopped
+    ports:
+      - "993:993"
+      - "24:24"   # LMTP from Haraka
+    volumes:
+      - dovecot_mail:/var/mail
+      - ./dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./dovecot/passwd:/etc/dovecot/passwd:ro
+      - ./dovecot/master-passwd:/etc/dovecot/master-passwd:ro
+      - dovecot_ssl:/etc/ssl/dovecot:ro
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "993"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  dovecot_mail:
+  dovecot_ssl:

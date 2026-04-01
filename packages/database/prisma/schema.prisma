@@ -1,0 +1,551 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum TierName {
+  STARTER
+  GROWTH
+  PRO
+  ENTERPRISE
+}
+
+enum SubscriptionStatus {
+  TRIALING
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  UNPAID
+}
+
+enum DomainStatus {
+  PENDING_VERIFICATION
+  VERIFIED
+  WARMING
+  WARMED
+  PAUSED
+  ERROR
+}
+
+enum MailboxStatus {
+  PROVISIONING
+  ACTIVE
+  SUSPENDED
+  DELETED
+}
+
+enum MailboxRole {
+  SEED       // Our internal warming seed mailbox
+  CUSTOMER   // Customer's mailbox being warmed
+}
+
+enum WarmingStatus {
+  SCHEDULED
+  ACTIVE
+  PAUSED
+  COMPLETED
+  FAILED
+}
+
+enum DnsProvider {
+  AZURE
+  CLOUDFLARE
+  ROUTE53
+  MANUAL
+}
+
+enum DnsRecordType {
+  TXT
+  MX
+  CNAME
+}
+
+enum DnsRecordStatus {
+  PENDING
+  PROVISIONED
+  VERIFIED
+  FAILED
+}
+
+enum EmailEventType {
+  SENT
+  DELIVERED
+  OPENED
+  CLICKED
+  BOUNCED
+  COMPLAINED
+  UNSUBSCRIBED
+  REPLIED
+}
+
+enum BounceType {
+  HARD
+  SOFT
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+enum AuditAction {
+  DOMAIN_ADDED
+  DOMAIN_REMOVED
+  MAILBOX_PROVISIONED
+  WARMING_STARTED
+  WARMING_PAUSED
+  WARMING_STOPPED
+  DNS_RECORD_CREATED
+  DNS_RECORD_DELETED
+  SSO_CONFIGURED
+  MEMBER_INVITED
+  MEMBER_REMOVED
+  SUBSCRIPTION_CHANGED
+  API_KEY_CREATED
+  API_KEY_REVOKED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TENANT / ORGANIZATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Tenant {
+  id              String             @id @default(cuid())
+  name            String
+  slug            String             @unique
+  logoUrl         String?
+  whiteLabelDomain String?           // Enterprise: custom dashboard domain
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+
+  // Relations
+  members         TenantMember[]
+  domains         Domain[]
+  seedMailboxes   SeedMailbox[]
+  subscription    Subscription?
+  apiKeys         ApiKey[]
+  webhooks        Webhook[]
+  auditLogs       AuditLog[]
+  ssoConnection   SsoConnection?
+  dmarcReports    DmarcReport[]
+
+  @@index([slug])
+}
+
+model TenantMember {
+  id         String     @id @default(cuid())
+  tenantId   String
+  userId     String
+  role       MemberRole @default(MEMBER)
+  invitedAt  DateTime   @default(now())
+  joinedAt   DateTime?
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId])
+  @@index([tenantId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  name          String?
+  avatarUrl     String?
+  passwordHash  String?        // null if SSO-only
+  emailVerified DateTime?
+  lastLoginAt   DateTime?
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  memberships   TenantMember[]
+  sessions      Session[]
+
+  @@index([email])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SSO (Pro+ tier)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model SsoConnection {
+  id              String   @id @default(cuid())
+  tenantId        String   @unique
+  workosOrgId     String   @unique
+  workosConnId    String?
+  provider        String   // "okta" | "azure-ad" | "google" | "saml" etc.
+  domain          String   // e.g. "acme.com" — auto-match inbound users
+  enabled         Boolean  @default(false)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUBSCRIPTION & BILLING
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  tenantId             String             @unique
+  tier                 TierName           @default(STARTER)
+  status               SubscriptionStatus @default(TRIALING)
+  stripeCustomerId     String?            @unique
+  stripeSubscriptionId String?            @unique
+  stripePriceId        String?
+  currentPeriodStart   DateTime?
+  currentPeriodEnd     DateTime?
+  trialEndsAt          DateTime?
+  cancelAtPeriodEnd    Boolean            @default(false)
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  tenant               Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DOMAINS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Domain {
+  id              String         @id @default(cuid())
+  tenantId        String
+  name            String         // e.g. "acme.com"
+  status          DomainStatus   @default(PENDING_VERIFICATION)
+  verificationToken String       @unique @default(cuid())
+  verifiedAt      DateTime?
+  reputationScore Int?           // 0–100 rolling score
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  tenant          Tenant         @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  mailboxes       Mailbox[]
+  dnsConfig         DnsConfiguration?
+  warmingSchedule   WarmingSchedule?
+  emailEvents       EmailEvent[]
+  reputationChecks  ReputationCheck[]
+
+  @@unique([tenantId, name])
+  @@index([tenantId])
+  @@index([name])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DNS CONFIGURATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DnsConfiguration {
+  id           String      @id @default(cuid())
+  domainId     String      @unique
+  provider     DnsProvider @default(MANUAL)
+  // Provider credentials (encrypted at app layer, stored as KV JSON)
+  credentialRef String?    // Azure Key Vault secret reference
+  zoneId       String?     // Cloudflare zone ID or Route53 hosted zone ID
+  dkimPrivateKey String?  @db.Text  // PEM-encoded RSA private key for DKIM signing
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  domain       Domain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  records      DnsRecord[]
+}
+
+model DnsRecord {
+  id           String          @id @default(cuid())
+  dnsConfigId  String
+  type         DnsRecordType
+  name         String          // e.g. "_dmarc" or "@" or "mail._domainkey"
+  value        String          @db.Text
+  ttl          Int             @default(300)
+  status       DnsRecordStatus @default(PENDING)
+  providerRecordId String?     // ID returned by DNS provider API
+  verifiedAt   DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  dnsConfig    DnsConfiguration @relation(fields: [dnsConfigId], references: [id], onDelete: Cascade)
+
+  @@index([dnsConfigId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MAILBOXES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Mailbox {
+  id              String        @id @default(cuid())
+  domainId        String
+  address         String        // full email: warm1@acme.com
+  displayName     String?
+  role            MailboxRole   @default(CUSTOMER)
+  status          MailboxStatus @default(PROVISIONING)
+  // Dovecot virtual account
+  dovecotUsername String        @unique
+  // DKIM selector for this mailbox's domain (shared at domain level)
+  dkimSelector    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  domain          Domain        @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  sentEvents      EmailEvent[]  @relation("SenderMailbox")
+  receivedEvents  EmailEvent[]  @relation("RecipientMailbox")
+
+  @@unique([address])
+  @@index([domainId])
+  @@index([address])
+}
+
+// Internal seed mailbox pool (our infrastructure, not tenant-owned)
+model SeedMailbox {
+  id          String        @id @default(cuid())
+  tenantId    String?       // null = global shared pool; set = dedicated to tenant (Enterprise)
+  address     String        @unique
+  displayName String?
+  status      MailboxStatus @default(ACTIVE)
+  tierPool    TierName      @default(STARTER) // which pool tier this belongs to
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  tenant      Tenant?       @relation(fields: [tenantId], references: [id])
+  interactions EmailEvent[] @relation("SeedMailbox")
+
+  @@index([tenantId])
+  @@index([tierPool])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// WARMING ENGINE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model WarmingSchedule {
+  id              String        @id @default(cuid())
+  domainId        String        @unique
+  status          WarmingStatus @default(SCHEDULED)
+  startDate       DateTime
+  targetDailyVolume Int         // Final daily send volume goal
+  currentDay      Int           @default(0)
+  rampCurve       String        @default("LINEAR") // LINEAR | EXPONENTIAL | AGGRESSIVE
+  // Serialized JSON: array of { day, volume } for custom curves (Pro+)
+  customCurve     Json?
+  autoReply       Boolean       @default(true)
+  autoOpen        Boolean       @default(true)
+  autoClick       Boolean       @default(false)
+  pausedAt        DateTime?
+  completedAt     DateTime?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  domain          Domain        @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  dailyLogs       WarmingDayLog[]
+
+  @@index([status])
+}
+
+model WarmingDayLog {
+  id              String          @id @default(cuid())
+  scheduleId      String
+  dayNumber       Int
+  date            DateTime        @db.Date
+  targetVolume    Int
+  actualSent      Int             @default(0)
+  delivered       Int             @default(0)
+  opened          Int             @default(0)
+  clicked         Int             @default(0)
+  bounced         Int             @default(0)
+  complained      Int             @default(0)
+  replied         Int             @default(0)
+  inboxRate       Float?          // % landed in inbox (from inbox placement tests)
+  createdAt       DateTime        @default(now())
+
+  schedule        WarmingSchedule @relation(fields: [scheduleId], references: [id], onDelete: Cascade)
+
+  @@unique([scheduleId, dayNumber])
+  @@index([scheduleId])
+  @@index([date])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// EMAIL EVENTS (metrics)
+// ─────────────────────────────────────────────────────────────────────────────
+
+model EmailEvent {
+  id              String         @id @default(cuid())
+  domainId        String
+  senderMailboxId String?
+  recipientMailboxId String?
+  seedMailboxId   String?
+  messageId       String?        // SMTP Message-ID header
+  type            EmailEventType
+  bounceType      BounceType?
+  subject         String?
+  ipAddress       String?
+  userAgent       String?
+  clickUrl        String?
+  metadata        Json?
+  occurredAt      DateTime       @default(now())
+
+  domain          Domain         @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  sender          Mailbox?       @relation("SenderMailbox", fields: [senderMailboxId], references: [id])
+  recipient       Mailbox?       @relation("RecipientMailbox", fields: [recipientMailboxId], references: [id])
+  seedMailbox     SeedMailbox?   @relation("SeedMailbox", fields: [seedMailboxId], references: [id])
+
+  @@index([domainId])
+  @@index([occurredAt])
+  @@index([type])
+  @@index([messageId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DMARC
+// ─────────────────────────────────────────────────────────────────────────────
+
+model DmarcReport {
+  id              String   @id @default(cuid())
+  tenantId        String
+  domain          String
+  reportingOrg    String
+  reportId        String
+  dateRangeBegin  DateTime
+  dateRangeEnd    DateTime
+  rawXml          String   @db.Text
+  parsed          Json     // Structured parsed report
+  passCount       Int      @default(0)
+  failCount       Int      @default(0)
+  createdAt       DateTime @default(now())
+
+  tenant          Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, reportId])
+  @@index([tenantId])
+  @@index([domain])
+  @@index([dateRangeBegin])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// API KEYS & WEBHOOKS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ApiKey {
+  id          String    @id @default(cuid())
+  tenantId    String
+  name        String
+  keyHash     String    @unique   // bcrypt hash of the actual key
+  keyPrefix   String              // first 8 chars shown in UI e.g. "mw_live_ab12"
+  scopes      String[]  @default(["read", "write"])
+  lastUsedAt  DateTime?
+  expiresAt   DateTime?
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([keyHash])
+}
+
+model Webhook {
+  id          String    @id @default(cuid())
+  tenantId    String
+  url         String
+  secret      String    // HMAC-SHA256 signing secret
+  events      String[]  // ["email.bounced", "warming.completed", etc.]
+  enabled     Boolean   @default(true)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  tenant      Tenant    @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  deliveries  WebhookDelivery[]
+
+  @@index([tenantId])
+}
+
+model WebhookDelivery {
+  id          String    @id @default(cuid())
+  webhookId   String
+  eventType   String
+  payload     Json
+  statusCode  Int?
+  response    String?
+  attemptCount Int      @default(1)
+  succeededAt DateTime?
+  failedAt    DateTime?
+  nextRetryAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  webhook     Webhook   @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@index([webhookId])
+  @@index([nextRetryAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REPUTATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ReputationCheck {
+  id              String   @id @default(cuid())
+  domainId        String
+  score           Int      // 0–100
+  // Per-signal breakdown stored as JSON
+  // { spf, dkim, dmarc, blacklists: [{name, listed, weight}], metrics: {...} }
+  signals         Json
+  listedOn        String[] // names of blacklists the domain/IP is listed on
+  checkedAt       DateTime @default(now())
+
+  domain          Domain   @relation(fields: [domainId], references: [id], onDelete: Cascade)
+
+  @@index([domainId])
+  @@index([checkedAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOG
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id          String      @id @default(cuid())
+  tenantId    String
+  actorId     String?     // userId who performed the action
+  action      AuditAction
+  resourceType String?    // "domain" | "mailbox" | "member" etc.
+  resourceId  String?
+  metadata    Json?
+  ipAddress   String?
+  occurredAt  DateTime    @default(now())
+
+  tenant      Tenant      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([occurredAt])
+  @@index([actorId])
+}

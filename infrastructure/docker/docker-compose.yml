@@ -1,0 +1,141 @@
+version: "3.9"
+
+services:
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mailwarm
+      POSTGRES_PASSWORD: mailwarm_dev
+      POSTGRES_DB: mailwarm
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mailwarm"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ────────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Haraka MTA ───────────────────────────────────────────────────────────────
+  mta:
+    build:
+      context: ../../apps/mta
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "587:587"   # STARTTLS submission
+      - "465:465"   # SMTPS (implicit TLS)
+    environment:
+      API_URL: http://api:3001
+      REDIS_URL: redis://redis:6379
+      MTA_INTERNAL_TOKEN: ${MTA_INTERNAL_TOKEN:-dev-token}
+      MTA_HOSTNAME: mail.mailwarm.local
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - mta_spool:/var/spool/haraka
+      - ../../apps/mta/config:/app/config:ro
+      - ../../apps/mta/plugins:/app/plugins:ro
+
+  # ── Dovecot IMAP ─────────────────────────────────────────────────────────────
+  dovecot:
+    image: dovecot/dovecot:latest
+    restart: unless-stopped
+    ports:
+      - "993:993"   # IMAPS
+    volumes:
+      - dovecot_mail:/var/mail
+      - ./dovecot/dovecot.conf:/etc/dovecot/dovecot.conf:ro
+      - ./dovecot/passwd:/etc/dovecot/passwd:ro
+    environment:
+      DOVECOT_SSL_CERT: /etc/ssl/dovecot/fullchain.pem
+      DOVECOT_SSL_KEY: /etc/ssl/dovecot/privkey.pem
+
+  # ── API ──────────────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: ../../
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgresql://mailwarm:mailwarm_dev@postgres:5432/mailwarm
+      REDIS_URL: redis://redis:6379
+      NEXTAUTH_SECRET: dev-secret-change-in-prod
+      NODE_ENV: development
+      MTA_HOST: mta
+      MTA_PORT_SUBMISSION: 587
+      IMAP_HOST: dovecot
+      IMAP_PORT: 993
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  # ── Web (Next.js) ────────────────────────────────────────────────────────────
+  web:
+    build:
+      context: ../../
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXTAUTH_URL: http://localhost:3000
+        NEXTAUTH_SECRET: dev-secret-change-in-prod
+        NEXT_PUBLIC_API_URL: http://localhost:3001
+        NEXT_PUBLIC_APP_URL: http://localhost:3000
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      NEXTAUTH_URL: http://localhost:3000
+      NEXTAUTH_SECRET: dev-secret-change-in-prod
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_APP_URL: http://localhost:3000
+    depends_on:
+      api:
+        condition: service_started
+
+  # ── Worker ───────────────────────────────────────────────────────────────────
+  worker:
+    build:
+      context: ../../
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    command: ["node", "dist/workers/index.js"]
+    environment:
+      DATABASE_URL: postgresql://mailwarm:mailwarm_dev@postgres:5432/mailwarm
+      REDIS_URL: redis://redis:6379
+      NODE_ENV: development
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  redis_data:
+  mta_spool:
+  dovecot_mail:
