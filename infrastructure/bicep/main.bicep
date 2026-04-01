@@ -44,8 +44,6 @@ param sesSmtpUser string
 @secure()
 param sesSmtpPass string
 
-@description('AWS SES SMTP endpoint region (e.g. us-east-1)')
-param sesSmtpRegion string = 'us-east-1'
 
 @description('Dovecot master-user username')
 @secure()
@@ -207,7 +205,7 @@ module mtaVm './modules/mta-vm.bicep' = {
 // AcrPull role for the MTA VM so it can pull images from ACR
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 resource vmAcrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(acr.outputs.id, mtaVm.outputs.principalId, acrPullRoleId)
+  name: guid(acr.outputs.name, mtaVm.outputs.vmName, acrPullRoleId)
   scope: resourceGroup()
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
@@ -228,8 +226,6 @@ module containerApps './modules/container-apps.bicep' = {
     tags: tags
     caEnvId: caEnv.id
     acrServer: acr.outputs.loginServer
-    postgresHost: postgres.outputs.host
-    redisHost: redis.outputs.host
     mtaHost: mtaVm.outputs.publicIpAddress
     kvVaultUri: keyvault.outputs.vaultUri
     kvResourceId: resourceId('Microsoft.KeyVault/vaults', '${prefix}-kv')

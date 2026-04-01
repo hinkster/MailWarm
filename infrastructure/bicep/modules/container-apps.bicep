@@ -3,8 +3,6 @@ param location string
 param tags object
 param caEnvId string
 param acrServer string
-param postgresHost string
-param redisHost string
 param mtaHost string       // Public IP of the MTA VM
 param kvVaultUri string    // Key Vault URI for secret refs
 param kvResourceId string  // Key Vault resource ID for role assignments
