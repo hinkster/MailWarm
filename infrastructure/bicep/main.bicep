@@ -119,7 +119,7 @@ resource kvSecretRedisUrl 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
     // Azure Cache for Redis uses TLS on port 6380 with the primary access key
     value: 'rediss://:${listKeys(resourceId('Microsoft.Cache/redis', '${prefix}-redis'), '2023-08-01').primaryKey}@${redis.outputs.host}:6380'
   }
-  dependsOn: [keyvault, redis]
+  dependsOn: [keyvault]
 }
 
 resource kvSecretNextauth 'Microsoft.KeyVault/vaults/secrets@2023-07-01' = {
@@ -205,7 +205,7 @@ module mtaVm './modules/mta-vm.bicep' = {
 // AcrPull role for the MTA VM so it can pull images from ACR
 var acrPullRoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d'
 resource vmAcrPullRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
-  name: guid(acr.outputs.name, mtaVm.outputs.vmName, acrPullRoleId)
+  name: guid(prefix, 'mta-vm', acrPullRoleId)
   scope: resourceGroup()
   properties: {
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', acrPullRoleId)
