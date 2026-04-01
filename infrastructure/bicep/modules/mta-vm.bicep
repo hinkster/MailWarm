@@ -105,7 +105,7 @@ resource vm 'Microsoft.Compute/virtualMachines@2023-09-01' = {
   tags: tags
   identity: { type: 'SystemAssigned' }
   properties: {
-    hardwareProfile: { vmSize: 'Standard_B2ms' }
+    hardwareProfile: { vmSize: 'Standard_D2s_v3' }
     storageProfile: {
       imageReference: {
         publisher: 'Canonical'
