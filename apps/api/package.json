@@ -28,7 +28,7 @@
     "bullmq": "^5.3.0",
     "cloudflare": "^3.0.0",
     "dotenv": "^16.4.0",
-    "fastify": "^4.26.0",
+    "fastify": "^5.8.5",
     "graphql": "^16.8.1",
     "imapflow": "^1.2.18",
     "ioredis": "^5.3.2",
